@@ -7,7 +7,7 @@
 
 * Features
 - *Heading Spacing*: Configurable blank lines between a heading and its content, and between consecutive headings.
-- *Paragraph Wrapping*: Optional paragraph wrapping with a customizable fill column.
+- *Paragraph & List Wrapping*: Optional paragraph and list item wrapping with a customizable fill column.
 - *List Formatting*: Normalizes indentation and spacing for unordered and ordered lists.
 - *Block & Drawer Preservation*: Safely preserves Org blocks (e.g., =#+BEGIN_SRC= / =#+END_SRC=) and property drawers (e.g., =:PROPERTIES:= / =:END:=) while formatting content around them.
 - *Check Mode*: Quickly verify if a file is formatted without modifying it, ideal for CI pipelines.
@@ -35,7 +35,8 @@ cat my_file.org | ./target/release/org-formatter [OPTIONS] > formatted_file.org
 - =--heading-to-body-spacing=N= : Set the number of blank lines between an Org heading and the body text (default: 1).
 - =--heading-to-heading-spacing=N= : Set the number of blank lines between consecutive Org headings (default: 1).
 - =--wrap-paragraphs= : Enable automatic wrapping of regular text paragraphs.
-- =--fill-column=N= : Set the maximum line width for wrapping paragraphs (default: 80).
+- =--wrap-lists= : Enable automatic wrapping of bulleted and numbered list items. Each item's text, including its continuation lines, is reflowed and wrapped lines are aligned with the text after the bullet (checkboxes are not included in the alignment, matching Org's own filling).
+- =--fill-column=N= : Set the maximum line width for wrapping paragraphs and list items (default: 80).
 - =--left-indent= : Indent all content lines under headings with a single tab, preserving deeper relative indentation (e.g. nested lists). Headings, drawers, and block contents are left untouched. Before the first heading, =#+= keyword lines (e.g. =#+TITLE:=) stay at column 0.
 - =--check= : Check if the input is already correctly formatted. Exits with status =0= if formatted, =1= otherwise.
 

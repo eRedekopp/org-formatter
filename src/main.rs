@@ -326,17 +326,21 @@ fn split_list_line(line: &str) -> Option<(String, String, String)> {
     None
 }
 
-fn wrap_list_line(line: &str, fill_column: usize) -> Vec<String> {
-    if let Some((indent, bullet, content)) = split_list_line(line) {
-        if content.is_empty() {
-            return vec![format_list_line(line)];
-        }
-
+/// Reflow a list item (its bullet line followed by any continuation lines) to the fill column,
+/// aligning wrapped lines with the text after the bullet.
+fn wrap_list_item(item: &[String], fill_column: usize) -> Vec<String> {
+    let line = &item[0];
+    if let Some((indent, bullet, first_content)) = split_list_line(line) {
+        let content = std::iter::once(first_content.as_str())
+            .chain(item[1..].iter().map(|l| l.trim()))
+            .collect::<Vec<_>>()
+            .join(" ");
         let words: Vec<&str> = content.split_whitespace().collect();
         if words.is_empty() {
             return vec![format_list_line(line)];
         }
 
+        let bullet = format!("{} ", bullet.trim_end());
         let indent_width = str_width(&indent);
         let bullet_width = str_width(&bullet);
         let first_line_prefix_width = indent_width + bullet_width;
@@ -392,7 +396,7 @@ fn wrap_list_line(line: &str, fill_column: usize) -> Vec<String> {
 
         wrapped_lines
     } else {
-        vec![line.to_string()]
+        item.to_vec()
     }
 }
 
@@ -570,11 +574,20 @@ fn format_org(input: &str, options: &FormatOptions) -> String {
 
     // Consecutive paragraph lines accumulator
     let mut accumulated_paragraph: Vec<String> = Vec::new();
+    // Current list item's bullet line plus continuation lines (only used with wrap_lists).
+    // Spacing before the item is emitted when the item starts, so flushing only adds its lines.
+    let mut accumulated_list_item: Vec<String> = Vec::new();
 
     let flush_paragraph = |accumulated: &mut Vec<String>,
+                           list_item: &mut Vec<String>,
                            formatted: &mut Vec<String>,
                            pending_lines: &mut usize,
                            is_first: &mut bool| {
+        if !list_item.is_empty() {
+            formatted.extend(wrap_list_item(list_item, options.fill_column));
+            list_item.clear();
+        }
+
         if accumulated.is_empty() {
             return;
         }
@@ -651,6 +664,7 @@ fn format_org(input: &str, options: &FormatOptions) -> String {
                 if is_empty {
                     flush_paragraph(
                         &mut accumulated_paragraph,
+                        &mut accumulated_list_item,
                         &mut formatted_lines,
                         &mut pending_empty_lines,
                         &mut is_first_line,
@@ -664,6 +678,7 @@ fn format_org(input: &str, options: &FormatOptions) -> String {
                 if trimmed_upper.starts_with("#+BEGIN_") {
                     flush_paragraph(
                         &mut accumulated_paragraph,
+                        &mut accumulated_list_item,
                         &mut formatted_lines,
                         &mut pending_empty_lines,
                         &mut is_first_line,
@@ -730,6 +745,7 @@ fn format_org(input: &str, options: &FormatOptions) -> String {
                 } else if is_drawer_start(&trimmed_upper) {
                     flush_paragraph(
                         &mut accumulated_paragraph,
+                        &mut accumulated_list_item,
                         &mut formatted_lines,
                         &mut pending_empty_lines,
                         &mut is_first_line,
@@ -767,6 +783,7 @@ fn format_org(input: &str, options: &FormatOptions) -> String {
                 } else if is_heading_line(raw_line) {
                     flush_paragraph(
                         &mut accumulated_paragraph,
+                        &mut accumulated_list_item,
                         &mut formatted_lines,
                         &mut pending_empty_lines,
                         &mut is_first_line,
@@ -793,6 +810,7 @@ fn format_org(input: &str, options: &FormatOptions) -> String {
                 } else if is_list_item(trimmed) {
                     flush_paragraph(
                         &mut accumulated_paragraph,
+                        &mut accumulated_list_item,
                         &mut formatted_lines,
                         &mut pending_empty_lines,
                         &mut is_first_line,
@@ -814,16 +832,29 @@ fn format_org(input: &str, options: &FormatOptions) -> String {
                     pending_empty_lines = 0;
 
                     if options.wrap_lists {
-                        let wrapped = wrap_list_line(&content, options.fill_column);
-                        for line in wrapped {
-                            formatted_lines.push(line);
-                        }
+                        accumulated_list_item.push(content);
                     } else {
                         formatted_lines.push(format_list_line(&content));
                     }
                     is_first_line = false;
                 } else {
-                    if options.wrap_paragraphs && is_regular_paragraph_line(raw_line) {
+                    let is_list_continuation = !accumulated_list_item.is_empty()
+                        && is_regular_paragraph_line(raw_line)
+                        && str_width(&content_indent)
+                            > str_width(leading_whitespace(&accumulated_list_item[0]));
+
+                    if is_list_continuation {
+                        accumulated_list_item.push(content);
+                    } else if options.wrap_paragraphs && is_regular_paragraph_line(raw_line) {
+                        if !accumulated_list_item.is_empty() {
+                            flush_paragraph(
+                                &mut accumulated_paragraph,
+                                &mut accumulated_list_item,
+                                &mut formatted_lines,
+                                &mut pending_empty_lines,
+                                &mut is_first_line,
+                            );
+                        }
                         if accumulated_paragraph.is_empty() {
                             let last_is_header = formatted_lines
                                 .last()
@@ -837,6 +868,7 @@ fn format_org(input: &str, options: &FormatOptions) -> String {
                     } else {
                         flush_paragraph(
                             &mut accumulated_paragraph,
+                            &mut accumulated_list_item,
                             &mut formatted_lines,
                             &mut pending_empty_lines,
                             &mut is_first_line,
@@ -867,6 +899,7 @@ fn format_org(input: &str, options: &FormatOptions) -> String {
     // Flush any remaining accumulated paragraph at the end of the file
     flush_paragraph(
         &mut accumulated_paragraph,
+        &mut accumulated_list_item,
         &mut formatted_lines,
         &mut pending_empty_lines,
         &mut is_first_line,
@@ -1283,6 +1316,95 @@ x
   #+END_SRC
 ";
         assert_eq!(format_org(input, &FormatOptions::default()), expected);
+    }
+
+    fn wrap_lists_options(fill_column: usize) -> FormatOptions {
+        FormatOptions {
+            wrap_lists: true,
+            fill_column,
+            ..FormatOptions::default()
+        }
+    }
+
+    #[test]
+    fn test_wrap_lists_reflows_continuation_lines() {
+        let input = "-   First item that was
+  wrapped too
+  early by hand and now needs reflowing.
+- Second item.
+Not a continuation.";
+        let expected = "- First item that was wrapped too early by
+  hand and now needs reflowing.
+- Second item.
+Not a continuation.
+";
+        assert_eq!(format_org(input, &wrap_lists_options(45)), expected);
+    }
+
+    #[test]
+    fn test_wrap_lists_nested_and_numbered() {
+        let input = "- Parent item with enough text to need wrapping here.
+  - Child item with enough text to need wrapping as well.
+10. Numbered item with enough text to need wrapping here.";
+        let expected = "- Parent item with enough text to need
+  wrapping here.
+  - Child item with enough text to need
+    wrapping as well.
+10. Numbered item with enough text to need
+    wrapping here.
+";
+        assert_eq!(format_org(input, &wrap_lists_options(42)), expected);
+    }
+
+    #[test]
+    fn test_wrap_lists_checkbox_aligns_after_bullet() {
+        let input = "- [ ] A checkbox item with enough text to need wrapping.";
+        let expected = "- [ ] A checkbox item with enough text to
+  need wrapping.
+";
+        assert_eq!(format_org(input, &wrap_lists_options(42)), expected);
+    }
+
+    #[test]
+    fn test_wrap_lists_separate_paragraph_in_item() {
+        let input = "- Item text.
+
+  A second paragraph in the item that is long enough to wrap.";
+        let options = FormatOptions {
+            wrap_paragraphs: true,
+            ..wrap_lists_options(40)
+        };
+        let expected = "- Item text.
+
+  A second paragraph in the item that is
+  long enough to wrap.
+";
+        assert_eq!(format_org(input, &options), expected);
+    }
+
+    #[test]
+    fn test_wrap_lists_with_left_indent() {
+        let input = "* Heading
+- Parent item with enough text to need wrapping.
+  continued
+  - Child item with enough text to need wrapping.
+Following paragraph text.";
+        let options = FormatOptions {
+            left_indent: true,
+            wrap_paragraphs: true,
+            ..wrap_lists_options(44)
+        };
+        let expected = "* Heading
+
+\t- Parent item with enough text to
+\t  need wrapping. continued
+\t  - Child item with enough text to
+\t    need wrapping.
+\tFollowing paragraph text.
+";
+        let formatted = format_org(input, &options);
+        assert_eq!(formatted, expected);
+        assert_eq!(format_org(&formatted, &options), formatted);
     }
 
     fn left_indent_options() -> FormatOptions {
