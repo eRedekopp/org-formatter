@@ -241,6 +241,17 @@ fn is_regular_paragraph_line(line: &str) -> bool {
         return false;
     }
 
+    // Check for fixed-width lines
+    if trimmed == ":" || trimmed.starts_with(": ") {
+        return false;
+    }
+
+    // Check for horizontal rules
+    let trimmed_end = trimmed.trim_end();
+    if trimmed_end.len() >= 5 && trimmed_end.chars().all(|c| c == '-') {
+        return false;
+    }
+
     true
 }
 
@@ -1649,6 +1660,19 @@ Text.";
         };
         let once = format_org(input, &options);
         assert_eq!(format_org(&once, &options), once);
+    }
+
+    #[test]
+    fn test_wrap_paragraphs_skips_fixed_width_and_rules() {
+        let input = "Text.
+: fixed width
+-----
+More text.";
+        let options = FormatOptions {
+            wrap_paragraphs: true,
+            ..FormatOptions::default()
+        };
+        assert_eq!(format_org(input, &options), format!("{}\n", input));
     }
 
     fn wrap_lists_options(fill_column: usize) -> FormatOptions {
