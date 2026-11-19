@@ -71,8 +71,15 @@ fn get_heading_level(line: &str) -> Option<usize> {
     }
 }
 
+fn is_planning_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    ["SCHEDULED:", "DEADLINE:", "CLOSED:"]
+        .iter()
+        .any(|keyword| trimmed.starts_with(keyword))
+}
+
 fn is_heading_or_drawer_end(line: &str) -> bool {
-    is_heading_line(line) || line.trim().ends_with(":END:")
+    is_heading_line(line) || line.trim().ends_with(":END:") || is_planning_line(line)
 }
 
 fn is_list_item(line: &str) -> bool {
@@ -500,9 +507,18 @@ fn section_base_indents(lines: &[&str]) -> Vec<usize> {
     let mut seen_heading = false;
     let mut closing_tag: Option<String> = None;
     let mut in_drawer = false;
+    let mut after_heading = false;
 
     for (i, line) in lines.iter().enumerate() {
         let trimmed_upper = line.trim().to_uppercase();
+        if !trimmed_upper.is_empty() {
+            let was_after_heading = after_heading;
+            after_heading = false;
+            // Planning lines keep their indentation, so they don't count toward the base
+            if was_after_heading && closing_tag.is_none() && !in_drawer && is_planning_line(line) {
+                continue;
+            }
+        }
         if let Some(tag) = &closing_tag {
             if trimmed_upper.starts_with(tag.as_str()) {
                 closing_tag = None;
@@ -531,6 +547,7 @@ fn section_base_indents(lines: &[&str]) -> Vec<usize> {
             section_start = i;
             section_min = None;
             seen_heading = true;
+            after_heading = true;
             continue;
         }
 
@@ -807,6 +824,12 @@ fn format_org(input: &str, options: &FormatOptions) -> String {
                     formatted_lines.push(trimmed.trim_start().to_string());
                     is_first_line = false;
                     seen_heading = true;
+                } else if is_planning_line(trimmed)
+                    && formatted_lines.last().map_or(false, |l| is_heading_line(l))
+                {
+                    // Planning lines must directly follow their heading to be recognized by Org
+                    pending_empty_lines = 0;
+                    formatted_lines.push(trimmed.to_string());
                 } else if is_list_item(trimmed) {
                     flush_paragraph(
                         &mut accumulated_paragraph,
@@ -1319,6 +1342,39 @@ x
   #+END_SRC
 ";
         assert_eq!(format_org(input, &FormatOptions::default()), expected);
+    }
+
+    #[test]
+    fn test_planning_line_stays_under_heading() {
+        let input = "* TODO Task
+
+SCHEDULED: <2026-11-19 Thu> DEADLINE: <2026-11-20 Fri>
+:PROPERTIES:
+:ID: x
+:END:
+:LOGBOOK:
+CLOCK: [2026-11-19 Thu 09:00]--[2026-11-19 Thu 10:00] =>  1:00
+:END:
+Body text.";
+        let expected = "* TODO Task
+SCHEDULED: <2026-11-19 Thu> DEADLINE: <2026-11-20 Fri>
+:PROPERTIES:
+:ID: x
+:END:
+:LOGBOOK:
+CLOCK: [2026-11-19 Thu 09:00]--[2026-11-19 Thu 10:00] =>  1:00
+:END:
+
+\tBody text.
+";
+        let options = left_indent_options();
+        let formatted = format_org(input, &options);
+        assert_eq!(formatted, expected);
+        assert_eq!(format_org(&formatted, &options), formatted);
+        assert_eq!(
+            format_org("* H\nSCHEDULED: <2026-11-19 Thu>\nText.", &FormatOptions::default()),
+            "* H\nSCHEDULED: <2026-11-19 Thu>\n\nText.\n"
+        );
     }
 
     fn wrap_lists_options(fill_column: usize) -> FormatOptions {
