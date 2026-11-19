@@ -7,6 +7,7 @@
 
 * Features
 - *Heading Spacing*: Configurable blank lines between a heading and its content, and between consecutive headings.
+- *Body Element Spacing*: Optional blank lines between adjacent paragraphs, lists, tables, blocks, and other elements of different types.
 - *Paragraph & List Wrapping*: Optional paragraph and list item wrapping with a customizable fill column.
 - *List Formatting*: Normalizes indentation and spacing for unordered and ordered lists.
 - *Block & Drawer Preservation*: Safely preserves Org blocks (e.g., =#+BEGIN_SRC= / =#+END_SRC=) and property drawers (e.g., =:PROPERTIES:= / =:END:=) while formatting content around them.
@@ -34,6 +35,7 @@ cat my_file.org | ./target/release/org-formatter [OPTIONS] > formatted_file.org
 ** Options
 - =--heading-to-body-spacing=N= : Set the number of blank lines between an Org heading and the body text (default: 1).
 - =--heading-to-heading-spacing=N= : Set the number of blank lines between consecutive Org headings (default: 1).
+- =--body-to-body-spacing=N= : Set the minimum number of blank lines between adjacent body elements of different types, such as paragraphs, lists, tables, blocks, and fixed-width areas (default: 0, disabled). Existing blank lines are never removed, with one exception: affiliated keywords (=#+CAPTION=, =#+NAME=, =#+ATTR_*=, =#+RESULTS=, etc.) are always kept directly above the element they attach to, since a blank line would detach them. Comments stick to the element below them, =#+TBLFM= stays attached to its table, and text, tables, or blocks nested inside a list item are spaced by their own type.
 - =--wrap-paragraphs= : Enable automatic wrapping of regular text paragraphs.
 - =--wrap-lists= : Enable automatic wrapping of bulleted and numbered list items. Each item's text, including its continuation lines, is reflowed and wrapped lines are aligned with the text after the bullet (checkboxes are not included in the alignment, matching Org's own filling).
 - =--fill-column=N= : Set the maximum line width for wrapping paragraphs and list items (default: 80).

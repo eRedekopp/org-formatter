@@ -8,6 +8,7 @@ struct FormatOptions {
     wrap_lists: bool,                  // default is false
     fill_column: usize,                // default is 80
     left_indent: bool,                 // default is false
+    body_to_body_spacing: usize,       // min blank lines between different body elements, 0 disables
 }
 
 impl Default for FormatOptions {
@@ -19,6 +20,7 @@ impl Default for FormatOptions {
             wrap_lists: false,
             fill_column: 80,
             left_indent: false,
+            body_to_body_spacing: 0,
         }
     }
 }
@@ -563,6 +565,105 @@ fn section_base_indents(lines: &[&str]) -> Vec<usize> {
     bases
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ElementKind {
+    Paragraph,
+    List,
+    Table,
+    TableFormula,
+    Block,
+    FixedWidth,
+    Comment,
+    Keyword,
+    AffiliatedKeyword,
+    Drawer,
+    HorizontalRule,
+}
+
+/// Keywords that attach to the element directly below them (e.g. #+CAPTION above a table).
+fn is_affiliated_keyword(trimmed: &str) -> bool {
+    let name: String = trimmed
+        .trim_start_matches("#+")
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect::<String>()
+        .to_uppercase();
+    name.starts_with("ATTR_")
+        || matches!(
+            name.as_str(),
+            "CAPTION" | "NAME" | "HEADER" | "HEADERS" | "PLOT" | "RESULTS" | "TBLNAME" | "DATA"
+                | "LABEL" | "SOURCE" | "SRCNAME"
+        )
+}
+
+fn element_kind(line: &str) -> ElementKind {
+    let trimmed = line.trim();
+    let upper = trimmed.to_uppercase();
+    if trimmed.starts_with('|') {
+        ElementKind::Table
+    } else if upper.starts_with("#+BEGIN_") {
+        ElementKind::Block
+    } else if upper.starts_with("#+TBLFM:") {
+        ElementKind::TableFormula
+    } else if trimmed.starts_with("#+") {
+        if is_affiliated_keyword(trimmed) {
+            ElementKind::AffiliatedKeyword
+        } else {
+            ElementKind::Keyword
+        }
+    } else if trimmed == "#" || trimmed.starts_with("# ") {
+        ElementKind::Comment
+    } else if trimmed == ":" || trimmed.starts_with(": ") {
+        ElementKind::FixedWidth
+    } else if is_drawer_start(&upper) {
+        ElementKind::Drawer
+    } else if trimmed.len() >= 5 && trimmed.chars().all(|c| c == '-') {
+        ElementKind::HorizontalRule
+    } else {
+        ElementKind::Paragraph
+    }
+}
+
+/// Like `element_kind`, but plain text indented past the current list's outermost bullet counts
+/// as part of the list. `list_base` tracks that bullet's indentation width while inside a list.
+fn classify_element(line: &str, indent_width: usize, list_base: &mut Option<usize>) -> ElementKind {
+    if is_list_item(line) {
+        if list_base.map_or(true, |base| indent_width < base) {
+            *list_base = Some(indent_width);
+        }
+        return ElementKind::List;
+    }
+    if let Some(base) = *list_base {
+        if indent_width <= base {
+            *list_base = None;
+        } else if is_regular_paragraph_line(line) {
+            return ElementKind::List;
+        }
+    }
+    element_kind(line)
+}
+
+/// Blank lines to emit between consecutive body elements given the blank lines already pending.
+/// Affiliated keywords always hug the element below them, comments stick to whatever follows,
+/// and #+TBLFM stays attached to its table.
+fn body_spacing(
+    prev: Option<ElementKind>,
+    next: ElementKind,
+    pending: usize,
+    spacing: usize,
+) -> usize {
+    use ElementKind::*;
+    match prev {
+        None => pending,
+        Some(AffiliatedKeyword) => 0,
+        Some(prev) => {
+            let attached =
+                prev == next || prev == Comment || (prev == Table && next == TableFormula);
+            if attached { pending } else { pending.max(spacing) }
+        }
+    }
+}
+
 fn format_org(input: &str, options: &FormatOptions) -> String {
     let mut lines: Vec<&str> = input.lines().collect();
 
@@ -583,6 +684,9 @@ fn format_org(input: &str, options: &FormatOptions) -> String {
     let mut pending_empty_lines = 0;
     let mut is_first_line = true;
     let mut seen_heading = false;
+    // Kind of the previous body element, or None right after a heading/drawer/file start
+    let mut last_kind: Option<ElementKind> = None;
+    let mut list_base: Option<usize> = None;
     let base_indents = if options.left_indent {
         section_base_indents(&lines)
     } else {
@@ -655,6 +759,8 @@ fn format_org(input: &str, options: &FormatOptions) -> String {
                     formatted_lines.push(format!("{}{}", indent, ":END:"));
                     state = State::Normal;
                     pending_empty_lines = options.heading_to_body_spacing;
+                    last_kind = None;
+                    list_base = None;
                 } else if is_empty {
                     // Collapse empty lines inside drawers
                 } else {
@@ -691,6 +797,13 @@ fn format_org(input: &str, options: &FormatOptions) -> String {
                 }
 
                 let trimmed_upper = trimmed.trim().to_uppercase();
+                let kind = classify_element(trimmed, str_width(&content_indent), &mut list_base);
+                let apply_body_spacing = |pending: &mut usize, last: &mut Option<ElementKind>| {
+                    if options.body_to_body_spacing > 0 {
+                        *pending = body_spacing(*last, kind, *pending, options.body_to_body_spacing);
+                    }
+                    *last = Some(kind);
+                };
 
                 if trimmed_upper.starts_with("#+BEGIN_") {
                     flush_paragraph(
@@ -708,6 +821,7 @@ fn format_org(input: &str, options: &FormatOptions) -> String {
                     if last_is_header {
                         pending_empty_lines = options.heading_to_body_spacing;
                     }
+                    apply_body_spacing(&mut pending_empty_lines, &mut last_kind);
 
                     if !is_first_line {
                         for _ in 0..pending_empty_lines {
@@ -788,6 +902,7 @@ fn format_org(input: &str, options: &FormatOptions) -> String {
                             }
                         }
                     } else if !is_first_line {
+                        apply_body_spacing(&mut pending_empty_lines, &mut last_kind);
                         for _ in 0..pending_empty_lines {
                             formatted_lines.push(String::new());
                         }
@@ -824,6 +939,8 @@ fn format_org(input: &str, options: &FormatOptions) -> String {
                     formatted_lines.push(trimmed.trim_start().to_string());
                     is_first_line = false;
                     seen_heading = true;
+                    last_kind = None;
+                    list_base = None;
                 } else if is_planning_line(trimmed)
                     && formatted_lines.last().map_or(false, |l| is_heading_line(l))
                 {
@@ -846,6 +963,7 @@ fn format_org(input: &str, options: &FormatOptions) -> String {
                     if last_is_header {
                         pending_empty_lines = options.heading_to_body_spacing;
                     }
+                    apply_body_spacing(&mut pending_empty_lines, &mut last_kind);
 
                     if !is_first_line {
                         for _ in 0..pending_empty_lines {
@@ -889,6 +1007,7 @@ fn format_org(input: &str, options: &FormatOptions) -> String {
                             if last_is_header {
                                 pending_empty_lines = options.heading_to_body_spacing;
                             }
+                            apply_body_spacing(&mut pending_empty_lines, &mut last_kind);
                         }
                         accumulated_paragraph.push(content);
                     } else {
@@ -907,6 +1026,7 @@ fn format_org(input: &str, options: &FormatOptions) -> String {
                         if last_is_header {
                             pending_empty_lines = options.heading_to_body_spacing;
                         }
+                        apply_body_spacing(&mut pending_empty_lines, &mut last_kind);
 
                         if !is_first_line {
                             for _ in 0..pending_empty_lines {
@@ -962,6 +1082,13 @@ fn main() {
         }
         if arg == "--left-indent" {
             options.left_indent = true;
+        }
+        if arg.starts_with("--body-to-body-spacing=") {
+            if let Some(val_str) = arg.split('=').nth(1) {
+                if let Ok(val) = val_str.parse::<usize>() {
+                    options.body_to_body_spacing = val;
+                }
+            }
         }
         if arg.starts_with("--fill-column=") {
             if let Some(val_str) = arg.split('=').nth(1) {
@@ -1375,6 +1502,153 @@ CLOCK: [2026-11-19 Thu 09:00]--[2026-11-19 Thu 10:00] =>  1:00
             format_org("* H\nSCHEDULED: <2026-11-19 Thu>\nText.", &FormatOptions::default()),
             "* H\nSCHEDULED: <2026-11-19 Thu>\n\nText.\n"
         );
+    }
+
+    fn body_spacing_options(spacing: usize) -> FormatOptions {
+        FormatOptions {
+            body_to_body_spacing: spacing,
+            ..FormatOptions::default()
+        }
+    }
+
+    #[test]
+    fn test_body_spacing_between_element_types() {
+        let input = "#+TITLE: T
+#+STARTUP: overview
+Intro.
+* H
+Text.
+- item
+  continuation
+- item 2
+| a |
+Text.";
+        let expected = "#+TITLE: T
+#+STARTUP: overview
+
+Intro.
+
+* H
+
+Text.
+
+- item
+  continuation
+- item 2
+
+| a |
+
+Text.
+";
+        assert_eq!(format_org(input, &body_spacing_options(1)), expected);
+    }
+
+    #[test]
+    fn test_body_spacing_attached_elements() {
+        let input = "Text.
+#+CAPTION: cap
+
+#+NAME: tbl
+| a |
+#+TBLFM: $1=1
+# comment
+#+begin_src sh
+echo
+#+end_src
+#+RESULTS:
+
+: echo";
+        let expected = "Text.
+
+#+CAPTION: cap
+#+NAME: tbl
+| a |
+#+TBLFM: $1=1
+
+# comment
+#+BEGIN_SRC sh
+echo
+#+END_SRC
+
+#+RESULTS:
+: echo
+";
+        assert_eq!(format_org(input, &body_spacing_options(1)), expected);
+    }
+
+    #[test]
+    fn test_body_spacing_inside_list_items() {
+        let input = "- item
+  | nested | table |
+  more item text
+  - nested item
+  nested continuation
+Text.";
+        let expected = "- item
+
+  | nested | table |
+
+  more item text
+  - nested item
+  nested continuation
+
+Text.
+";
+        assert_eq!(format_org(input, &body_spacing_options(1)), expected);
+    }
+
+    #[test]
+    fn test_body_spacing_multiple_lines_and_existing_blanks_kept() {
+        let input = "* H
+Text.
+- item
+
+Text.";
+        let expected = "* H
+
+Text.
+
+
+- item
+
+
+Text.
+";
+        assert_eq!(format_org(input, &body_spacing_options(2)), expected);
+        assert_eq!(
+            format_org("Text.\n\n- item", &body_spacing_options(0)),
+            "Text.\n\n- item\n"
+        );
+        assert_eq!(format_org("Text.\n- item", &body_spacing_options(0)), "Text.\n- item\n");
+    }
+
+    #[test]
+    fn test_body_spacing_idempotent_with_all_options() {
+        let input = "#+TITLE: T
+Intro.
+* H
+SCHEDULED: <2026-11-19 Thu>
+:PROPERTIES:
+:ID: x
+:END:
+Text that is long enough to wrap when the fill column is small.
+- item that is long enough to wrap when the fill column is small
+  | t |
+#+CAPTION: c
+| a |
+: fixed
+-----
+Text.";
+        let options = FormatOptions {
+            body_to_body_spacing: 1,
+            left_indent: true,
+            wrap_paragraphs: true,
+            wrap_lists: true,
+            fill_column: 40,
+            ..FormatOptions::default()
+        };
+        let once = format_org(input, &options);
+        assert_eq!(format_org(&once, &options), once);
     }
 
     fn wrap_lists_options(fill_column: usize) -> FormatOptions {
