@@ -846,7 +846,10 @@ fn format_org(input: &str, options: &FormatOptions) -> String {
                     if is_list_continuation {
                         accumulated_list_item.push(content);
                     } else if options.wrap_paragraphs && is_regular_paragraph_line(raw_line) {
-                        if !accumulated_list_item.is_empty() {
+                        let is_dedented = accumulated_paragraph.first().map_or(false, |first| {
+                            str_width(&content_indent) < str_width(leading_whitespace(first))
+                        });
+                        if !accumulated_list_item.is_empty() || is_dedented {
                             flush_paragraph(
                                 &mut accumulated_paragraph,
                                 &mut accumulated_list_item,
@@ -1401,6 +1404,29 @@ Following paragraph text.";
 \t  - Child item with enough text to
 \t    need wrapping.
 \tFollowing paragraph text.
+";
+        let formatted = format_org(input, &options);
+        assert_eq!(formatted, expected);
+        assert_eq!(format_org(&formatted, &options), formatted);
+    }
+
+    #[test]
+    fn test_wrap_paragraphs_dedent_starts_new_paragraph() {
+        let input = "* H
+  Indented paragraph text that wraps.
+Dedented text is a separate paragraph.";
+        let options = FormatOptions {
+            left_indent: true,
+            wrap_paragraphs: true,
+            fill_column: 40,
+            ..FormatOptions::default()
+        };
+        let expected = "* H
+
+\t  Indented paragraph text that
+\t  wraps.
+\tDedented text is a separate
+\tparagraph.
 ";
         let formatted = format_org(input, &options);
         assert_eq!(formatted, expected);
