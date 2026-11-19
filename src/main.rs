@@ -7,6 +7,7 @@ struct FormatOptions {
     wrap_paragraphs: bool,             // default is false
     wrap_lists: bool,                  // default is false
     fill_column: usize,                // default is 80
+    left_indent: bool,                 // default is false
 }
 
 impl Default for FormatOptions {
@@ -17,6 +18,7 @@ impl Default for FormatOptions {
             wrap_paragraphs: false,
             wrap_lists: false,
             fill_column: 80,
+            left_indent: false,
         }
     }
 }
@@ -457,6 +459,89 @@ fn wrap_paragraph(paragraph: &[String], fill_column: usize) -> Vec<String> {
     wrapped_lines
 }
 
+fn block_closing_tag(trimmed_upper: &str) -> String {
+    let first_word_upper = trimmed_upper.split_whitespace().next().unwrap_or("");
+    let keyword = first_word_upper.strip_prefix("#+BEGIN_").unwrap_or("");
+    format!("#+END_{}", keyword)
+}
+
+fn is_drawer_start(trimmed_upper: &str) -> bool {
+    trimmed_upper.starts_with(':') && trimmed_upper.ends_with(':') && trimmed_upper != ":END:"
+}
+
+fn leading_whitespace(line: &str) -> &str {
+    let len = line.len() - line.trim_start().len();
+    &line[..len]
+}
+
+/// Keyword lines (e.g. #+TITLE) before the first heading stay at column 0; all other
+/// non-heading, non-drawer content is left-indented.
+fn should_left_indent(line: &str, seen_heading: bool) -> bool {
+    seen_heading || !line.trim_start().starts_with("#+")
+}
+
+/// Replace the section's base indentation (`base` columns) with a single tab, keeping any
+/// indentation beyond the base as spaces so nested lists and continuation lines are preserved.
+fn left_indent_prefix(line: &str, base: usize) -> String {
+    let width = str_width(leading_whitespace(line));
+    format!("\t{}", " ".repeat(width.saturating_sub(base)))
+}
+
+/// For each line, the minimum indentation width among the left-indentable lines of its
+/// section, where sections are the preamble and the span under each heading.
+fn section_base_indents(lines: &[&str]) -> Vec<usize> {
+    let mut bases = vec![0; lines.len()];
+    let mut section_start = 0;
+    let mut section_min: Option<usize> = None;
+    let mut seen_heading = false;
+    let mut closing_tag: Option<String> = None;
+    let mut in_drawer = false;
+
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed_upper = line.trim().to_uppercase();
+        if let Some(tag) = &closing_tag {
+            if trimmed_upper.starts_with(tag.as_str()) {
+                closing_tag = None;
+            }
+            continue;
+        }
+        if in_drawer {
+            if trimmed_upper == ":END:" {
+                in_drawer = false;
+            }
+            continue;
+        }
+        if trimmed_upper.is_empty() {
+            continue;
+        }
+
+        if trimmed_upper.starts_with("#+BEGIN_") {
+            closing_tag = Some(block_closing_tag(&trimmed_upper));
+        } else if is_drawer_start(&trimmed_upper) {
+            in_drawer = true;
+            continue;
+        } else if is_heading_line(line) {
+            for base in &mut bases[section_start..i] {
+                *base = section_min.unwrap_or(0);
+            }
+            section_start = i;
+            section_min = None;
+            seen_heading = true;
+            continue;
+        }
+
+        if should_left_indent(line, seen_heading) {
+            let width = str_width(leading_whitespace(line));
+            section_min = Some(section_min.map_or(width, |m| m.min(width)));
+        }
+    }
+
+    for base in &mut bases[section_start..] {
+        *base = section_min.unwrap_or(0);
+    }
+    bases
+}
+
 fn format_org(input: &str, options: &FormatOptions) -> String {
     let mut lines: Vec<&str> = input.lines().collect();
 
@@ -476,6 +561,12 @@ fn format_org(input: &str, options: &FormatOptions) -> String {
     let mut state = State::Normal;
     let mut pending_empty_lines = 0;
     let mut is_first_line = true;
+    let mut seen_heading = false;
+    let base_indents = if options.left_indent {
+        section_base_indents(&lines)
+    } else {
+        Vec::new()
+    };
 
     // Consecutive paragraph lines accumulator
     let mut accumulated_paragraph: Vec<String> = Vec::new();
@@ -504,18 +595,23 @@ fn format_org(input: &str, options: &FormatOptions) -> String {
         *is_first = false;
     };
 
-    for raw_line in lines {
+    for (idx, raw_line) in lines.into_iter().enumerate() {
         let trimmed = raw_line.trim_end();
         let is_empty = trimmed.trim().is_empty();
+
+        // Indentation for non-heading, non-drawer content lines
+        let content_indent = if options.left_indent && should_left_indent(raw_line, seen_heading) {
+            left_indent_prefix(raw_line, base_indents[idx])
+        } else {
+            leading_whitespace(raw_line).to_string()
+        };
+        let content = format!("{}{}", content_indent, trimmed.trim_start());
 
         match state {
             State::InBlock(ref closing_tag) => {
                 let trimmed_upper = trimmed.trim().to_uppercase();
                 if trimmed_upper.starts_with(closing_tag) {
-                    let indent = raw_line
-                        .chars()
-                        .take_while(|c| c.is_whitespace())
-                        .collect::<String>();
+                    let indent = content_indent;
                     formatted_lines.push(format!("{}{}", indent, closing_tag));
                     state = State::Normal;
                     pending_empty_lines = 1;
@@ -588,14 +684,9 @@ fn format_org(input: &str, options: &FormatOptions) -> String {
                     }
                     pending_empty_lines = 0;
 
-                    let first_word_upper = trimmed_upper.split_whitespace().next().unwrap_or("");
-                    let keyword = first_word_upper.strip_prefix("#+BEGIN_").unwrap_or("");
-                    let closing_tag = format!("#+END_{}", keyword);
+                    let closing_tag = block_closing_tag(&trimmed_upper);
 
-                    let indent = raw_line
-                        .chars()
-                        .take_while(|c| c.is_whitespace())
-                        .collect::<String>();
+                    let indent = content_indent;
                     let block_line = trimmed.trim_start();
                     let first_word = block_line.split_whitespace().next().unwrap_or("");
                     let type_rest = block_line.strip_prefix(first_word).unwrap_or("").trim();
@@ -636,10 +727,7 @@ fn format_org(input: &str, options: &FormatOptions) -> String {
                     }
                     state = State::InBlock(closing_tag);
                     is_first_line = false;
-                } else if trimmed_upper.starts_with(":")
-                    && trimmed_upper.ends_with(":")
-                    && trimmed_upper != ":END:"
-                {
+                } else if is_drawer_start(&trimmed_upper) {
                     flush_paragraph(
                         &mut accumulated_paragraph,
                         &mut formatted_lines,
@@ -701,6 +789,7 @@ fn format_org(input: &str, options: &FormatOptions) -> String {
                     pending_empty_lines = 0;
                     formatted_lines.push(trimmed.trim_start().to_string());
                     is_first_line = false;
+                    seen_heading = true;
                 } else if is_list_item(trimmed) {
                     flush_paragraph(
                         &mut accumulated_paragraph,
@@ -725,12 +814,12 @@ fn format_org(input: &str, options: &FormatOptions) -> String {
                     pending_empty_lines = 0;
 
                     if options.wrap_lists {
-                        let wrapped = wrap_list_line(trimmed, options.fill_column);
+                        let wrapped = wrap_list_line(&content, options.fill_column);
                         for line in wrapped {
                             formatted_lines.push(line);
                         }
                     } else {
-                        formatted_lines.push(format_list_line(trimmed));
+                        formatted_lines.push(format_list_line(&content));
                     }
                     is_first_line = false;
                 } else {
@@ -744,7 +833,7 @@ fn format_org(input: &str, options: &FormatOptions) -> String {
                                 pending_empty_lines = options.heading_to_body_spacing;
                             }
                         }
-                        accumulated_paragraph.push(trimmed.to_string());
+                        accumulated_paragraph.push(content);
                     } else {
                         flush_paragraph(
                             &mut accumulated_paragraph,
@@ -767,7 +856,7 @@ fn format_org(input: &str, options: &FormatOptions) -> String {
                             }
                         }
                         pending_empty_lines = 0;
-                        formatted_lines.push(trimmed.to_string());
+                        formatted_lines.push(content);
                         is_first_line = false;
                     }
                 }
@@ -811,6 +900,9 @@ fn main() {
         }
         if arg == "--wrap-lists" {
             options.wrap_lists = true;
+        }
+        if arg == "--left-indent" {
+            options.left_indent = true;
         }
         if arg.starts_with("--fill-column=") {
             if let Some(val_str) = arg.split('=').nth(1) {
@@ -1191,5 +1283,140 @@ x
   #+END_SRC
 ";
         assert_eq!(format_org(input, &FormatOptions::default()), expected);
+    }
+
+    fn left_indent_options() -> FormatOptions {
+        FormatOptions {
+            left_indent: true,
+            ..FormatOptions::default()
+        }
+    }
+
+    #[test]
+    fn test_left_indent_content() {
+        let input = "* Heading
+:PROPERTIES:
+:ID: abc
+:END:
+Some text.
+- item
+  - nested
+    continuation
+| a | b |
+#+CAPTION: cap
+#+begin_src sh
+echo hi
+#+end_src";
+        let expected = "* Heading
+:PROPERTIES:
+:ID: abc
+:END:
+
+\tSome text.
+\t- item
+\t  - nested
+\t    continuation
+\t| a | b |
+\t#+CAPTION: cap
+\t#+BEGIN_SRC sh
+echo hi
+\t#+END_SRC
+";
+        assert_eq!(format_org(input, &left_indent_options()), expected);
+    }
+
+    #[test]
+    fn test_left_indent_replaces_base_indent() {
+        let input = "* Heading
+  Some text.
+  - item
+    - nested
+** Sub
+\tAlready indented.
+\t- item
+\t  - nested";
+        let expected = "* Heading
+
+\tSome text.
+\t- item
+\t  - nested
+
+** Sub
+
+\tAlready indented.
+\t- item
+\t  - nested
+";
+        assert_eq!(format_org(input, &left_indent_options()), expected);
+    }
+
+    #[test]
+    fn test_left_indent_preamble_keywords() {
+        let input = "#+TITLE: Title
+#+STARTUP: overview
+
+Intro text.
+* Heading
+#+CAPTION: cap";
+        let expected = "#+TITLE: Title
+#+STARTUP: overview
+
+\tIntro text.
+
+* Heading
+
+\t#+CAPTION: cap
+";
+        assert_eq!(format_org(input, &left_indent_options()), expected);
+    }
+
+    #[test]
+    fn test_left_indent_wrapping() {
+        let input = "* Heading
+This paragraph is long enough that it must wrap at the fill column.
+- A list item that is also long enough to wrap at the fill column.";
+        let options = FormatOptions {
+            left_indent: true,
+            wrap_paragraphs: true,
+            wrap_lists: true,
+            fill_column: 40,
+            ..FormatOptions::default()
+        };
+        let expected = "* Heading
+
+\tThis paragraph is long enough
+\tthat it must wrap at the fill
+\tcolumn.
+\t- A list item that is also long
+\t  enough to wrap at the fill
+\t  column.
+";
+        let formatted = format_org(input, &options);
+        assert_eq!(formatted, expected);
+        assert_eq!(format_org(&formatted, &options), formatted);
+    }
+
+    #[test]
+    fn test_left_indent_idempotent() {
+        let input = "#+TITLE: T
+Intro.
+* H
+  text
+  - a
+    - b
+#+begin_src sh :results output
+  echo hi
+#+end_src
+#+begin_example
+  raw
+#+end_example
+** H2
+:PROPERTIES:
+:X: y
+:END:
+| t |";
+        let options = left_indent_options();
+        let once = format_org(input, &options);
+        assert_eq!(format_org(&once, &options), once);
     }
 }

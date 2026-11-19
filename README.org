@@ -36,6 +36,7 @@ cat my_file.org | ./target/release/org-formatter [OPTIONS] > formatted_file.org
 - =--heading-to-heading-spacing=N= : Set the number of blank lines between consecutive Org headings (default: 1).
 - =--wrap-paragraphs= : Enable automatic wrapping of regular text paragraphs.
 - =--fill-column=N= : Set the maximum line width for wrapping paragraphs (default: 80).
+- =--left-indent= : Indent all content lines under headings with a single tab, preserving deeper relative indentation (e.g. nested lists). Headings, drawers, and block contents are left untouched. Before the first heading, =#+= keyword lines (e.g. =#+TITLE:=) stay at column 0.
 - =--check= : Check if the input is already correctly formatted. Exits with status =0= if formatted, =1= otherwise.
 
 * Emacs Integration
