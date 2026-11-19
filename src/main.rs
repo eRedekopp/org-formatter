@@ -75,7 +75,8 @@ fn get_heading_level(line: &str) -> Option<usize> {
 
 fn is_planning_line(line: &str) -> bool {
     let trimmed = line.trim_start();
-    ["SCHEDULED:", "DEADLINE:", "CLOSED:"]
+    // OPENED and CREATED are non-standard planning keywords added by some personal Org configs
+    ["SCHEDULED:", "DEADLINE:", "CLOSED:", "OPENED:", "CREATED:"]
         .iter()
         .any(|keyword| trimmed.starts_with(keyword))
 }
@@ -529,6 +530,7 @@ fn section_base_indents(lines: &[&str]) -> Vec<usize> {
             after_heading = false;
             // Planning lines keep their indentation, so they don't count toward the base
             if was_after_heading && closing_tag.is_none() && !in_drawer && is_planning_line(line) {
+                after_heading = true;
                 continue;
             }
         }
@@ -698,6 +700,7 @@ fn format_org(input: &str, options: &FormatOptions) -> String {
     // Kind of the previous body element, or None right after a heading/drawer/file start
     let mut last_kind: Option<ElementKind> = None;
     let mut list_base: Option<usize> = None;
+    let mut after_heading_or_planning = false;
     let base_indents = if options.left_indent {
         section_base_indents(&lines)
     } else {
@@ -808,6 +811,7 @@ fn format_org(input: &str, options: &FormatOptions) -> String {
                 }
 
                 let trimmed_upper = trimmed.trim().to_uppercase();
+                let planning_allowed = std::mem::replace(&mut after_heading_or_planning, false);
                 let kind = classify_element(trimmed, str_width(&content_indent), &mut list_base);
                 let apply_body_spacing = |pending: &mut usize, last: &mut Option<ElementKind>| {
                     if options.body_to_body_spacing > 0 {
@@ -952,12 +956,12 @@ fn format_org(input: &str, options: &FormatOptions) -> String {
                     seen_heading = true;
                     last_kind = None;
                     list_base = None;
-                } else if is_planning_line(trimmed)
-                    && formatted_lines.last().map_or(false, |l| is_heading_line(l))
-                {
+                    after_heading_or_planning = true;
+                } else if is_planning_line(trimmed) && planning_allowed {
                     // Planning lines must directly follow their heading to be recognized by Org
                     pending_empty_lines = 0;
                     formatted_lines.push(trimmed.to_string());
+                    after_heading_or_planning = true;
                 } else if is_list_item(trimmed) {
                     flush_paragraph(
                         &mut accumulated_paragraph,
@@ -1513,6 +1517,36 @@ CLOCK: [2026-11-19 Thu 09:00]--[2026-11-19 Thu 10:00] =>  1:00
             format_org("* H\nSCHEDULED: <2026-11-19 Thu>\nText.", &FormatOptions::default()),
             "* H\nSCHEDULED: <2026-11-19 Thu>\n\nText.\n"
         );
+    }
+
+    #[test]
+    fn test_multiple_planning_lines_including_custom_keywords() {
+        let input = "* TODO Task
+SCHEDULED: <2026-11-19 Thu>
+DEADLINE: <2026-11-20 Fri>
+OPENED: [2026-11-18 Wed 09:00]
+CREATED: [2026-11-18 Wed 09:00]
+:PROPERTIES:
+:ID: x
+:END:
+Text.
+DEADLINE: not planning here";
+        let expected = "* TODO Task
+SCHEDULED: <2026-11-19 Thu>
+DEADLINE: <2026-11-20 Fri>
+OPENED: [2026-11-18 Wed 09:00]
+CREATED: [2026-11-18 Wed 09:00]
+:PROPERTIES:
+:ID: x
+:END:
+
+\tText.
+\tDEADLINE: not planning here
+";
+        let options = left_indent_options();
+        let formatted = format_org(input, &options);
+        assert_eq!(formatted, expected);
+        assert_eq!(format_org(&formatted, &options), formatted);
     }
 
     fn body_spacing_options(spacing: usize) -> FormatOptions {
