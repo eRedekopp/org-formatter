@@ -596,8 +596,9 @@ fn format_org(input: &str, options: &FormatOptions) -> String {
                         .chars()
                         .take_while(|c| c.is_whitespace())
                         .collect::<String>();
-                    let first_word = trimmed.split_whitespace().next().unwrap_or("");
-                    let type_rest = trimmed.strip_prefix(first_word).unwrap_or("").trim();
+                    let block_line = trimmed.trim_start();
+                    let first_word = block_line.split_whitespace().next().unwrap_or("");
+                    let type_rest = block_line.strip_prefix(first_word).unwrap_or("").trim();
                     if type_rest.is_empty() {
                         formatted_lines.push(format!("{}{}", indent, first_word.to_uppercase()));
                     } else {
@@ -1178,5 +1179,17 @@ heading 2.
     ordered list wrapping.
 ";
         assert_eq!(format_org(input, &options), expected);
+    }
+
+    #[test]
+    fn test_indented_block_keeps_header_args() {
+        let input = "  #+begin_src python :results output
+x
+  #+end_src";
+        let expected = "  #+BEGIN_SRC python :results output
+x
+  #+END_SRC
+";
+        assert_eq!(format_org(input, &FormatOptions::default()), expected);
     }
 }
